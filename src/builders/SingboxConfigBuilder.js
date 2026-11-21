@@ -79,6 +79,13 @@ export class SingboxConfigBuilder extends BaseConfigBuilder {
         const resolvedBaseConfig = baseConfig ?? SING_BOX_CONFIG;
         super(inputString, resolvedBaseConfig, lang, userAgent, groupByCountry, includeAutoSelect);
 
+        // `dns.enable` is a legacy Clash/V2Ray-style switch, not a valid
+        // sing-box DNS option. Custom templates saved in KV may still contain it.
+        // Remove it before emitting configs for current sing-box clients.
+        if (this.config?.dns && Object.prototype.hasOwnProperty.call(this.config.dns, 'enable')) {
+            delete this.config.dns.enable;
+        }
+
         this.selectedRules = selectedRules;
         this.customRules = customRules;
         this.countryGroupNames = [];
