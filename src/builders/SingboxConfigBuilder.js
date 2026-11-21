@@ -7,6 +7,56 @@ import { buildSelectorMembers as buildSelectorMemberList, buildNodeSelectMembers
 import { normalizeGroupName } from './helpers/groupNameUtils.js';
 
 const RULE_SET_HTTP_CLIENT_TAG = 'rule-set-download';
+
+// sing-box decodes JSON strictly and aborts on the first unknown field, so any
+// Clash/Surge option that happens to share a key name with sing-box (dns,
+// experimental, hosts, port, ...) makes the generated config unusable.
+const SINGBOX_TOP_LEVEL_KEYS = new Set([
+    'log', 'dns', 'ntp', 'certificate', 'endpoints', 'inbounds',
+    'outbounds', 'route', 'services', 'experimental', 'http_clients'
+]);
+// `proxy-groups` is Clash input consumed by BaseConfigBuilder, never emitted,
+// so it must survive filtering of subscription overrides.
+const SINGBOX_OVERRIDE_KEYS = new Set([...SINGBOX_TOP_LEVEL_KEYS, 'proxy-groups']);
+const SINGBOX_DNS_KEYS = new Set([
+    'servers', 'rules', 'final', 'strategy', 'disable_cache', 'disable_expire',
+    'independent_cache', 'cache_capacity', 'reverse_mapping', 'client_subnet'
+]);
+const SINGBOX_EXPERIMENTAL_KEYS = new Set(['cache_file', 'clash_api', 'v2ray_api', 'debug']);
+
+function pickKnownKeys(value, keys) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => keys.has(key)));
+}
+
+// Returns undefined when nothing in the section belongs to sing-box: an
+// entirely foreign section must not overwrite the sing-box base config.
+function filterKnownSection(section, keys) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return section;
+    const filtered = pickKnownKeys(section, keys);
+    return Object.keys(filtered).length === 0 && Object.keys(section).length > 0
+        ? undefined
+        : filtered;
+}
+
+function sanitizeSingboxConfig(config, singboxVersion, allowedKeys = SINGBOX_TOP_LEVEL_KEYS) {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return config;
+    // `dns.fakeip` was removed in 1.14; 1.11/1.12 templates still use it.
+    const dnsKeys = singboxVersion === '1.14'
+        ? SINGBOX_DNS_KEYS
+        : new Set([...SINGBOX_DNS_KEYS, 'fakeip']);
+    const result = pickKnownKeys(config, allowedKeys);
+
+    Object.entries({ dns: dnsKeys, experimental: SINGBOX_EXPERIMENTAL_KEYS }).forEach(([key, keys]) => {
+        if (result[key] === undefined) return;
+        const filtered = filterKnownSection(result[key], keys);
+        if (filtered === undefined) delete result[key];
+        else result[key] = filtered;
+    });
+
+    return result;
+}
+
 const ANYTLS_OPTION_KEYS = {
     'idle-session-check-interval': 'idle_session_check_interval',
     'idle-session-timeout': 'idle_session_timeout',
@@ -79,12 +129,8 @@ export class SingboxConfigBuilder extends BaseConfigBuilder {
         const resolvedBaseConfig = baseConfig ?? SING_BOX_CONFIG;
         super(inputString, resolvedBaseConfig, lang, userAgent, groupByCountry, includeAutoSelect);
 
-        // `dns.enable` is a legacy Clash/V2Ray-style switch, not a valid
-        // sing-box DNS option. Custom templates saved in KV may still contain it.
-        // Remove it before emitting configs for current sing-box clients.
-        if (this.config?.dns && Object.prototype.hasOwnProperty.call(this.config.dns, 'enable')) {
-            delete this.config.dns.enable;
-        }
+        // Custom templates saved in KV may contain Clash-style options too.
+        this.config = sanitizeSingboxConfig(this.config, singboxVersion);
 
         this.selectedRules = selectedRules;
         this.customRules = customRules;
@@ -98,6 +144,10 @@ export class SingboxConfigBuilder extends BaseConfigBuilder {
         if (this.config?.dns?.servers?.length > 0) {
             this.config.dns.servers[0].detour = this.t('outboundNames.Node Select');
         }
+    }
+
+    applyConfigOverrides(overrides) {
+        super.applyConfigOverrides(sanitizeSingboxConfig(overrides, this.singboxVersion, SINGBOX_OVERRIDE_KEYS));
     }
 
     getProxies() {
